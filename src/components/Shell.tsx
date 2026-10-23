@@ -6,6 +6,7 @@ interface Me { name: string; role: string; email: string }
 const NAV = [
   { href: "/dashboard", label: "Dashboard" }, { href: "/leads", label: "Leads" }, { href: "/telecaller", label: "Telecaller Queue" },
   { href: "/customers", label: "Customers" }, { href: "/cases", label: "Loan Cases" }, { href: "/register", label: "Master Register" },
+  { href: "/tasks", label: "Tasks" }, { href: "/notifications", label: "Notifications" },
   { href: "/admin/employees", label: "Employees" }, { href: "/admin/products", label: "Loan Products" },
 ];
 export default function Shell({ children }: { children: React.ReactNode }) {

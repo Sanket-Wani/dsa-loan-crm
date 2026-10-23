@@ -9,3 +9,6 @@ uploads/*
 .DS_Store
 coverage/
 prisma/*.db
+
+# Private document storage (uploaded binaries — never commit)
+storage/

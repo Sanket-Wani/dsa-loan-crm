@@ -8,8 +8,8 @@ export async function POST(req: Request) {
   const p = schema.safeParse(await req.json().catch(() => null)); if (!p.success) return err("Invalid upload metadata");
   const invalid = validateUpload(p.data); if (invalid) return err(invalid, 422);
   const doc = await prisma.caseDocument.findUnique({ where: { id: p.data.documentId } }); if (!doc) return err("Document not found", 404);
-  // Metadata only: the binary is handled by the storage driver, never committed to git.
-  const updated = await prisma.caseDocument.update({ where: { id: doc.id }, data: { fileName: p.data.fileName, fileUrl: makeStorageKey(doc.caseId, p.data.fileName), mimeType: p.data.mimeType, sizeBytes: p.data.sizeBytes, status: "RECEIVED", uploadedById: a.user.id, uploadedAt: new Date(), version: doc.version + (doc.fileName ? 1 : 0) } });
+  // Legacy metadata-only endpoint (no binary stored). Prefer POST /api/documents/upload, which stores the actual file via the storage driver.
+  const updated = await prisma.caseDocument.update({ where: { id: doc.id }, data: { fileName: p.data.fileName, fileUrl: makeStorageKey(doc.caseId, doc.id, p.data.mimeType), mimeType: p.data.mimeType, sizeBytes: p.data.sizeBytes, status: "RECEIVED", uploadedById: a.user.id, uploadedAt: new Date(), version: doc.version + (doc.fileName ? 1 : 0) } });
   await audit(a.user.id, "DOCUMENT_UPLOAD_META", "CaseDocument", doc.id, { fileName: p.data.fileName, sizeBytes: p.data.sizeBytes });
   return ok(updated);
 }

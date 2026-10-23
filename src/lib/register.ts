@@ -1,5 +1,6 @@
 import { prisma } from "./db";
 export const REGISTER_COLUMNS = ["Login Date","Company Name","Client Name","Product","Status","Bank Name","Bank Manager / Consultant","Office Sales","Employee Code","Reference / Telecaller","Remarks","Sanctioned Loan Amount","Disbursed Loan Amount"] as const;
+export type RegisterRow = Awaited<ReturnType<typeof buildRegisterRows>>[number];
 export async function buildRegisterRows() {
   const apps = await prisma.bankApplication.findMany({ include: { bank: true, loanCase: { include: { customer: true, product: true, owner: true, lead: { include: { assignedTo: true } } } } }, orderBy: { loginDate: "desc" } });
   return apps.map((app) => ({

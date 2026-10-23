@@ -15,7 +15,11 @@ export async function POST(req: Request) {
   const parsed = employeeCreateSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return err(parsed.error.issues.map((i) => i.message).join("; "));
   if (parsed.data.role === "SUPER_ADMIN" && a.user.role !== "SUPER_ADMIN") return err("Only Super Admin can create a Super Admin", 403);
-  const user = await prisma.user.create({ data: { ...parsed.data, email: parsed.data.email.toLowerCase(), phone: parsed.data.phone ?? undefined, passwordHash: await hashPassword(parsed.data.password) } });
+  // Never spread the raw payload into Prisma: it contains the plaintext
+  // `password`, which is not a User column (Prisma rejects it) and must only
+  // ever be stored as passwordHash.
+  const { password: _pw, ...profile } = parsed.data;
+  const user = await prisma.user.create({ data: { ...profile, email: parsed.data.email.toLowerCase(), phone: parsed.data.phone ?? undefined, passwordHash: await hashPassword(parsed.data.password) } });
   await audit(a.user.id, "EMPLOYEE_CREATE", "User", user.id, { role: user.role });
   return ok({ id: user.id, email: user.email, role: user.role, employeeCode: user.employeeCode }, 201);
 }
