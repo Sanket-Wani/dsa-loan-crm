@@ -1,0 +1,526 @@
+// DSA Loan CRM — PostgreSQL is the source of truth.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  TELECALLER
+  BACK_OFFICE
+}
+
+enum LeadStatus {
+  NEW
+  UNASSIGNED
+  ASSIGNED
+  CONTACTED
+  FOLLOW_UP_REQUIRED
+  INTERESTED
+  QUALIFIED
+  MEETING_SCHEDULED
+  HANDED_OVER
+  NOT_INTERESTED
+  UNREACHABLE
+  DISQUALIFIED
+}
+
+enum CallOutcome {
+  ANSWERED
+  NOT_ANSWERED
+  BUSY
+  SWITCHED_OFF
+  CALLBACK_REQUESTED
+  INTERESTED
+  NOT_INTERESTED
+  WRONG_NUMBER
+  OTHER
+}
+
+enum FollowUpStatus {
+  PENDING
+  DONE
+  OVERDUE
+  CANCELLED
+}
+
+enum MeetingStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+  RESCHEDULED
+}
+
+enum CaseStage {
+  PRE_REVIEW
+  DOCUMENT_COLLECTION
+  DOCUMENT_VERIFICATION
+  ELIGIBILITY
+  BANK_LOGIN
+  PD
+  LEGAL
+  VALUATION
+  CREDIT_ASSESSMENT
+  IN_PRINCIPLE_SANCTION
+  FINAL_SANCTION
+  PRE_DISBURSEMENT
+  DISBURSED
+  POST_SALES
+  CLOSED
+  REJECTED
+}
+
+enum CaseStatus {
+  OPEN
+  ON_HOLD
+  SANCTIONED
+  DISBURSED
+  CLOSED
+  REJECTED
+}
+
+enum DocumentStatus {
+  REQUIRED
+  REQUESTED
+  RECEIVED
+  UNDER_VERIFICATION
+  VERIFIED
+  REJECTED
+  CORRECTION_REQUIRED
+  SUBMITTED_TO_BANK
+}
+
+enum BankAppStatus {
+  PREPARING
+  LOGGED_IN
+  PD_PENDING
+  LEGAL_VALUATION
+  CREDIT_REVIEW
+  QUERY_RAISED
+  IN_PRINCIPLE_SANCTION
+  FINAL_SANCTION
+  DISBURSED
+  REJECTED
+  WITHDRAWN
+}
+
+enum QueryStatus {
+  OPEN
+  ASSIGNED
+  RESOLVED
+  CLOSED
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum EligibilityDecision {
+  PENDING
+  APPROVED_FOR_BANK_SUBMISSION
+  REJECTED
+  NEEDS_REVIEW
+}
+
+enum AnalysisStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  NOT_CONFIGURED
+}
+
+enum NotificationChannel {
+  IN_APP
+  WHATSAPP
+  EMAIL
+  SMS
+}
+
+enum NotificationStatus {
+  PENDING
+  QUEUED
+  SENT
+  FAILED
+  SKIPPED
+}
+
+model User {
+  id String @id @default(cuid())
+  email String @unique
+  name String
+  phone String?
+  passwordHash String
+  role Role @default(TELECALLER)
+  employeeCode String @unique
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  assignedLeads Lead[] @relation("LeadAssignee")
+  createdLeads Lead[] @relation("LeadCreator")
+  assignmentHistory LeadAssignmentHistory[] @relation("HistoryActor")
+  calls CallActivity[]
+  meetings Meeting[] @relation("MeetingAssignee")
+  cases LoanCase[] @relation("CaseOwner")
+  uploadedDocs CaseDocument[] @relation("DocUploader")
+  reviewedDocs CaseDocument[] @relation("DocReviewer")
+  auditLogs AuditLog[]
+  tasks Task[] @relation("TaskAssignee")
+  notifications Notification[]
+  bankQueriesAssigned BankQuery[] @relation("QueryAssignee")
+}
+
+model LoanProduct {
+  id String @id @default(cuid())
+  code String @unique
+  name String
+  description String?
+  pendingConfirmation Boolean @default(false)
+  isActive Boolean @default(true)
+  eligibilityFields Json?
+  workflow Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  leads Lead[]
+  cases LoanCase[]
+  requirements DocumentRequirement[]
+}
+
+model Lead {
+  id String @id @default(cuid())
+  name String
+  phone String
+  normalizedPhone String @db.VarChar(15)
+  email String?
+  normalizedEmail String?
+  company String?
+  city String?
+  location String?
+  productId String?
+  product LoanProduct? @relation(fields: [productId], references: [id])
+  productCode String?
+  requestedAmount Float?
+  source String @default("MANUAL")
+  status LeadStatus @default(UNASSIGNED)
+  assignedToId String?
+  assignedTo User? @relation("LeadAssignee", fields: [assignedToId], references: [id])
+  createdById String?
+  createdBy User? @relation("LeadCreator", fields: [createdById], references: [id])
+  nextFollowUpAt DateTime?
+  remarks String?
+  qualificationNotes String?
+  customerId String?
+  customer Customer? @relation(fields: [customerId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  history LeadAssignmentHistory[]
+  calls CallActivity[]
+  followUps FollowUp[]
+  meetings Meeting[]
+  handovers Handover[]
+  cases LoanCase[]
+  callAnalysis CallAnalysisRecord[]
+  @@index([normalizedPhone])
+  @@index([normalizedEmail])
+  @@index([status, assignedToId])
+}
+
+model LeadAssignmentHistory {
+  id String @id @default(cuid())
+  leadId String
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  fromUserId String?
+  toUserId String?
+  actorId String?
+  actor User? @relation("HistoryActor", fields: [actorId], references: [id])
+  reason String?
+  createdAt DateTime @default(now())
+}
+
+model CallActivity {
+  id String @id @default(cuid())
+  leadId String
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  callerId String?
+  caller User? @relation(fields: [callerId], references: [id])
+  outcome CallOutcome @default(OTHER)
+  durationSeconds Int?
+  remarks String?
+  objections String?
+  requirements String?
+  calledAt DateTime @default(now())
+  createdAt DateTime @default(now())
+}
+
+model FollowUp {
+  id String @id @default(cuid())
+  leadId String?
+  lead Lead? @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  caseId String?
+  loanCase LoanCase? @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  dueAt DateTime
+  status FollowUpStatus @default(PENDING)
+  notes String?
+  createdById String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Meeting {
+  id String @id @default(cuid())
+  leadId String?
+  lead Lead? @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  caseId String?
+  loanCase LoanCase? @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  scheduledAt DateTime
+  location String?
+  assignedToId String?
+  assignedTo User? @relation("MeetingAssignee", fields: [assignedToId], references: [id])
+  status MeetingStatus @default(SCHEDULED)
+  notes String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Handover {
+  id String @id @default(cuid())
+  leadId String
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  fromUserId String?
+  toUserId String
+  reason String?
+  notes String?
+  createdAt DateTime @default(now())
+}
+
+model Customer {
+  id String @id @default(cuid())
+  name String
+  phone String
+  normalizedPhone String @unique @db.VarChar(15)
+  email String?
+  normalizedEmail String? @unique
+  company String?
+  city String?
+  address String?
+  category String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  leads Lead[]
+  cases LoanCase[]
+}
+
+model LoanCase {
+  id String @id @default(cuid())
+  code String @unique
+  customerId String
+  customer Customer @relation(fields: [customerId], references: [id])
+  leadId String?
+  lead Lead? @relation(fields: [leadId], references: [id])
+  productId String?
+  product LoanProduct? @relation(fields: [productId], references: [id])
+  productCode String?
+  requestedAmount Float?
+  stage CaseStage @default(PRE_REVIEW)
+  status CaseStatus @default(OPEN)
+  ownerId String?
+  owner User? @relation("CaseOwner", fields: [ownerId], references: [id])
+  officeSales String?
+  remarks String?
+  sanctionedAmount Float?
+  disbursedAmount Float?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  documents CaseDocument[]
+  eligibility EligibilityAssessment[]
+  bankApplications BankApplication[]
+  tasks Task[]
+  followUps FollowUp[]
+  meetings Meeting[]
+  statusHistory StatusHistory[]
+}
+
+model StatusHistory {
+  id String @id @default(cuid())
+  caseId String?
+  loanCase LoanCase? @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  leadId String?
+  entity String
+  entityId String
+  fromStatus String?
+  toStatus String
+  actorId String?
+  notes String?
+  createdAt DateTime @default(now())
+}
+
+model DocumentRequirement {
+  id String @id @default(cuid())
+  productId String?
+  product LoanProduct? @relation(fields: [productId], references: [id])
+  bankId String?
+  bank Bank? @relation(fields: [bankId], references: [id])
+  customerCategory String?
+  propertyType String?
+  stage String?
+  category String
+  name String
+  isMandatory Boolean @default(true)
+  createdAt DateTime @default(now())
+}
+
+model CaseDocument {
+  id String @id @default(cuid())
+  caseId String
+  loanCase LoanCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  requirementId String?
+  name String
+  category String
+  status DocumentStatus @default(REQUIRED)
+  fileName String?
+  fileUrl String?
+  mimeType String?
+  sizeBytes Int?
+  version Int @default(1)
+  uploadedById String?
+  uploadedBy User? @relation("DocUploader", fields: [uploadedById], references: [id])
+  reviewedById String?
+  reviewedBy User? @relation("DocReviewer", fields: [reviewedById], references: [id])
+  rejectionReason String?
+  uploadedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model EligibilityAssessment {
+  id String @id @default(cuid())
+  caseId String
+  loanCase LoanCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  inputs Json
+  assumptions Json?
+  results Json?
+  decision EligibilityDecision @default(PENDING)
+  reviewerId String?
+  reviewerNotes String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Bank {
+  id String @id @default(cuid())
+  name String @unique
+  code String? @unique
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  applications BankApplication[]
+  requirements DocumentRequirement[]
+}
+
+model BankApplication {
+  id String @id @default(cuid())
+  caseId String
+  loanCase LoanCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  bankId String
+  bank Bank @relation(fields: [bankId], references: [id])
+  managerName String?
+  consultantName String?
+  loginDate DateTime?
+  referenceNumber String?
+  requestedAmount Float?
+  status BankAppStatus @default(PREPARING)
+  assignedToId String?
+  sanctionedAmount Float?
+  disbursedAmount Float?
+  remarks String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  queries BankQuery[]
+}
+
+model BankQuery {
+  id String @id @default(cuid())
+  bankApplicationId String
+  bankApplication BankApplication @relation(fields: [bankApplicationId], references: [id], onDelete: Cascade)
+  title String
+  description String?
+  status QueryStatus @default(OPEN)
+  assignedToId String?
+  assignedTo User? @relation("QueryAssignee", fields: [assignedToId], references: [id])
+  resolvedAt DateTime?
+  resolution String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Task {
+  id String @id @default(cuid())
+  title String
+  description String?
+  status TaskStatus @default(TODO)
+  priority TaskPriority @default(MEDIUM)
+  dueAt DateTime?
+  assignedToId String?
+  assignedTo User? @relation("TaskAssignee", fields: [assignedToId], references: [id])
+  caseId String?
+  loanCase LoanCase? @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Notification {
+  id String @id @default(cuid())
+  userId String?
+  user User? @relation(fields: [userId], references: [id])
+  channel NotificationChannel @default(IN_APP)
+  status NotificationStatus @default(PENDING)
+  title String
+  body String?
+  entity String?
+  entityId String?
+  scheduledAt DateTime?
+  sentAt DateTime?
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id String @id @default(cuid())
+  actorId String?
+  actor User? @relation(fields: [actorId], references: [id])
+  action String
+  entity String
+  entityId String?
+  details Json?
+  ip String?
+  createdAt DateTime @default(now())
+}
+
+/// Modular future integration: CRM stays usable if the analysis service is down.
+model CallAnalysisRecord {
+  id String @id @default(cuid())
+  leadId String?
+  lead Lead? @relation(fields: [leadId], references: [id])
+  callActivityId String?
+  externalCallRef String?
+  transcript String?
+  summary String?
+  extractedFields Json?
+  status AnalysisStatus @default(NOT_CONFIGURED)
+  provider String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
