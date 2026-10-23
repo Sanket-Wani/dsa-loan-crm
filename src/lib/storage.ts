@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 
 /**
  * Document storage abstraction.
@@ -11,12 +12,14 @@ import { randomUUID } from "crypto";
  *   is git-ignored, and files are only ever served through the authenticated
  *   download endpoint (/api/documents/download), which enforces RBAC and
  *   object-level case access before streaming.
- * - "s3": S3-compatible object storage (AWS S3 / MinIO / R2 etc.). Configure
- *   with S3_BUCKET, S3_REGION, S3_ENDPOINT (optional, for S3-compatible
- *   providers), S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY. The interface is
- *   implemented against the minimal subset below; wire an SDK (e.g.
- *   @aws-sdk/client-s3) in `s3Driver()` when deploying — until configured it
- *   throws a clear "not configured" error rather than silently falling back.
+ * - "s3": S3-compatible object storage (AWS S3 / MinIO / R2 etc.), implemented
+ *   with @aws-sdk/client-s3. Configure with S3_BUCKET, S3_REGION, S3_ENDPOINT
+ *   (optional, for S3-compatible providers), S3_ACCESS_KEY_ID,
+ *   S3_SECRET_ACCESS_KEY. If required configuration is missing the driver
+ *   throws a clear "not configured" error rather than silently falling back
+ *   to local disk. The bucket must stay private; files are only ever served
+ *   through the authenticated download endpoint, exactly like the local
+ *   driver.
  *
  * Stored file names are always generated (UUID + extension from the validated
  * MIME type) and decoupled from the user-supplied original name, which is
@@ -90,21 +93,132 @@ const localDriver: StorageDriver = {
 };
 
 /**
- * S3-compatible driver stub. Intentionally not wired to an SDK in this repo
- * (no credentials exist in dev/CI); it validates configuration and fails
- * loudly so a misconfigured production deployment can never silently drop
- * files. To enable: install @aws-sdk/client-s3, then implement put/get with
- * PutObjectCommand/GetObjectCommand using the env vars checked below, keeping
- * the bucket private and serving downloads only via the authenticated API.
+ * S3-compatible driver (Milestone 3 — implemented with @aws-sdk/client-s3).
+ * Validates configuration and fails loudly so a misconfigured production
+ * deployment can never silently drop files or fall back to ephemeral local
+ * disk. Safety properties mirror the local driver:
+ * - keys are the generated storage keys from makeStorageKey(); traversal /
+ *   malformed keys are rejected before any request is made;
+ * - the bucket is addressed only by its configured name and is expected to
+ *   be private — objects are never made public and downloads are proxied
+ *   through the authenticated API endpoint, never via a direct/public URL;
+ * - credentials come only from env vars, never from code or the database.
  */
-export function s3ConfigError(): string {
-  const missing = ["S3_BUCKET", "S3_REGION", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"].filter((k) => !process.env[k]);
-  return `S3 storage driver is not configured (missing: ${missing.join(", ") || "SDK wiring"}). See docs/ARCHITECTURE.md.`;
+export const S3_REQUIRED_ENV = ["S3_BUCKET", "S3_REGION", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"] as const;
+
+export interface S3Config {
+  bucket: string;
+  region: string;
+  endpoint?: string;
+  accessKeyId: string;
+  secretAccessKey: string;
 }
 
+export function s3MissingEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return S3_REQUIRED_ENV.filter((k) => !env[k]);
+}
+
+export function s3ConfigError(env: NodeJS.ProcessEnv = process.env): string {
+  const missing = s3MissingEnv(env);
+  return `S3 storage driver is not configured (missing: ${missing.join(", ") || "unknown"}). See docs/ARCHITECTURE.md.`;
+}
+
+/** Read + validate the S3 configuration from env vars, throwing a clear error when incomplete. */
+export function getS3Config(env: NodeJS.ProcessEnv = process.env): S3Config {
+  if (s3MissingEnv(env).length > 0) throw new Error(s3ConfigError(env));
+  return {
+    bucket: env.S3_BUCKET as string,
+    region: env.S3_REGION as string,
+    endpoint: env.S3_ENDPOINT || undefined,
+    accessKeyId: env.S3_ACCESS_KEY_ID as string,
+    secretAccessKey: env.S3_SECRET_ACCESS_KEY as string,
+  };
+}
+
+/**
+ * Reject storage keys that could escape the intended namespace, mirroring
+ * resolveLocalPath() for the local driver. Generated keys are
+ * `<caseId>/<documentId>/<uuid>.<ext>` — no empty, "." or ".." segments,
+ * no leading slash, no backslashes.
+ */
+export function assertValidStorageKey(key: string): void {
+  if (!key || key.includes("\\") || key.split("/").some((part) => part === "" || part === "." || part === "..")) {
+    throw new Error("Invalid storage key");
+  }
+}
+
+/** Minimal structural type for the SDK client, so tests can inject a fake. */
+export interface S3ClientLike {
+  send(command: PutObjectCommand | GetObjectCommand): Promise<unknown>;
+}
+
+async function bodyToBuffer(body: unknown): Promise<Buffer> {
+  if (body == null) return Buffer.alloc(0);
+  const b = body as {
+    transformToByteArray?: () => Promise<Uint8Array>;
+    transformToString?: () => Promise<string>;
+  };
+  if (typeof b.transformToByteArray === "function") return Buffer.from(await b.transformToByteArray());
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  if (typeof body === "string") return Buffer.from(body);
+  // Fall back to consuming it as an async iterable / readable stream.
+  const chunks: Buffer[] = [];
+  for await (const chunk of body as AsyncIterable<Uint8Array>) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Create an S3 StorageDriver. With no arguments it builds a real S3Client
+ * from the env configuration (lazily, on first use). Tests may inject a
+ * fake `client` and/or an explicit `config` — no real S3 is contacted then.
+ */
+export function createS3Driver(client?: S3ClientLike, config?: S3Config): StorageDriver {
+  let resolvedClient: S3ClientLike | undefined = client;
+  let resolvedConfig: S3Config | undefined = config;
+  const ensure = (): { client: S3ClientLike; cfg: S3Config } => {
+    if (!resolvedConfig) resolvedConfig = getS3Config();
+    if (!resolvedClient) {
+      resolvedClient = new S3Client({
+        region: resolvedConfig.region,
+        endpoint: resolvedConfig.endpoint,
+        credentials: {
+          accessKeyId: resolvedConfig.accessKeyId,
+          secretAccessKey: resolvedConfig.secretAccessKey,
+        },
+        // S3-compatible providers (MinIO/R2) typically need path-style URLs
+        // when a custom endpoint is set; AWS itself works either way.
+        forcePathStyle: Boolean(resolvedConfig.endpoint),
+      }) as S3ClientLike;
+    }
+    return { client: resolvedClient, cfg: resolvedConfig };
+  };
+  return {
+    async put(key, data) {
+      assertValidStorageKey(key);
+      const { client: c, cfg } = ensure();
+      await c.send(new PutObjectCommand({ Bucket: cfg.bucket, Key: key, Body: data }));
+    },
+    async get(key) {
+      assertValidStorageKey(key);
+      const { client: c, cfg } = ensure();
+      const res = (await c.send(new GetObjectCommand({ Bucket: cfg.bucket, Key: key }))) as { Body?: unknown };
+      return bodyToBuffer(res?.Body);
+    },
+  };
+}
+
+let cachedS3Driver: StorageDriver | null = null;
 const s3Driver: StorageDriver = {
-  async put() { throw new Error(s3ConfigError()); },
-  async get() { throw new Error(s3ConfigError()); },
+  async put(key, data) {
+    if (!cachedS3Driver) cachedS3Driver = createS3Driver();
+    return cachedS3Driver.put(key, data);
+  },
+  async get(key) {
+    if (!cachedS3Driver) cachedS3Driver = createS3Driver();
+    return cachedS3Driver.get(key);
+  },
 };
 
 export function getStorageDriver(): StorageDriver {
